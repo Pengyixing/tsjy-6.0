@@ -196,6 +196,19 @@ struct DeviceControlWindow: View {
                             .buttonStyle(.borderedProminent)
                             .controlSize(.extraLarge)
                             .tint(.red)
+
+                            Button(action: {
+                                appModel.releaseEmergencyStop()
+                            }) {
+                                HStack {
+                                    Image(systemName: "arrow.clockwise.circle.fill")
+                                    Text("解除急停并恢复")
+                                        .font(.headline.bold())
+                                }
+                                .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.large)
                         }
                         .padding(20)
                     }

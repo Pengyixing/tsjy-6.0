@@ -5,6 +5,8 @@
 //  Created by Peng Yixing on 2026/5/12.
 //
 
+import CoreMedia
+import CoreVideo
 import Foundation
 import Network
 import Testing
@@ -28,6 +30,97 @@ private final class ResumeGate {
 }
 
 struct tsjyTests {
+
+    @Test func safetyManager_canReleaseEmergencyStopAndRestoreControl() async throws {
+        let manager = ControlSafetyManager()
+        let session = manager.register(clientID: "vision-client")
+        let command = ControlClientMessage(
+            type: "command",
+            clientID: "vision-client",
+            sessionID: session.sessionID,
+            commandID: "cmd-unlock",
+            deviceID: "assembler",
+            action: "moveForward",
+            parameters: [:],
+            reason: nil,
+            clientSendTimestamp: Date().timeIntervalSince1970
+        )
+
+        let armed = manager.arm(sessionID: session.sessionID)
+        #expect(armed.accepted == true)
+
+        manager.forceEmergencyStop(reason: "测试急停")
+        #expect(manager.lockStateDescription == "急停中")
+        #expect(manager.arm(sessionID: session.sessionID).accepted == false)
+
+        let release = manager.releaseEmergencyStop(sessionID: session.sessionID)
+        #expect(release.accepted == true)
+        #expect(release.message == "已解除急停并恢复控制权限")
+        #expect(manager.lockStateDescription == "已授权给 vision-client")
+
+        let validation = manager.validateCommand(sessionID: session.sessionID, message: command)
+        #expect(validation.accepted == true)
+    }
+
+    @MainActor
+    @Test func videoRecording_defaultsToDedicatedFolderUnderApplicationSupport() async throws {
+        let appModel = AppModel()
+
+        #expect(appModel.videoRecordingDirectoryPath.contains("/tsjy/video-recordings"))
+        #expect(FileManager.default.fileExists(atPath: appModel.videoRecordingDirectoryPath))
+        #expect(appModel.videoRecordingStatus == "未录制")
+    }
+
+    @MainActor
+    @Test func stateExport_defaultsToDesktopDataRecordDirectory() async throws {
+        UserDefaults.standard.removeObject(forKey: "StateExportDirectoryPath")
+        defer { UserDefaults.standard.removeObject(forKey: "StateExportDirectoryPath") }
+
+        let appModel = AppModel()
+        let expectedPath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Desktop/数据记录", isDirectory: true)
+            .path
+
+        #expect(appModel.stateExportDirectoryPath == expectedPath)
+        #expect(FileManager.default.fileExists(atPath: expectedPath))
+    }
+
+    @MainActor
+    @Test func appModel_canStartAndStopVideoRecordingSession() async throws {
+        let appModel = AppModel()
+
+        appModel.startVideoRecording()
+        #expect(appModel.isVideoRecording == true)
+        #expect(appModel.videoRecordingStatus.contains("录制中"))
+        #expect(appModel.activeVideoRecordingFilePath.contains(".mp4"))
+
+        await appModel.stopVideoRecording()
+        #expect(appModel.isVideoRecording == false)
+    }
+
+    @Test func panoramaVideoRecorder_writesMp4FileIntoRecordingDirectory() async throws {
+        let outputDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+
+        let recorder = PanoramaVideoRecorder(outputDirectory: outputDirectory)
+        let armedFileURL = try recorder.startRecording(filePrefix: "integration-test")
+        #expect(armedFileURL.pathExtension == "mp4")
+
+        let firstFrame = try makeTestPixelBuffer(width: 640, height: 320, rgb: (255, 64, 32))
+        let secondFrame = try makeTestPixelBuffer(width: 640, height: 320, rgb: (32, 128, 255))
+        try recorder.append(pixelBuffer: firstFrame, at: .zero)
+        try recorder.append(pixelBuffer: secondFrame, at: CMTime(value: 1, timescale: 30))
+
+        let finalizedFileURL = try await recorder.stopRecording()
+        let exportedFileURL = try #require(finalizedFileURL)
+
+        #expect(exportedFileURL.pathExtension == "mp4")
+        #expect(FileManager.default.fileExists(atPath: exportedFileURL.path))
+        let attributes = try FileManager.default.attributesOfItem(atPath: exportedFileURL.path)
+        let size = attributes[.size] as? NSNumber
+        #expect((size?.intValue ?? 0) > 0)
+    }
 
     @MainActor
     @Test func publishedVideoSocketURL_wrapsBareIPv6Host() async throws {
@@ -1264,4 +1357,48 @@ private func buildWriteMultipleRegistersFrame(
     }
 
     return Data(bytes)
+}
+
+private func makeTestPixelBuffer(
+    width: Int,
+    height: Int,
+    rgb: (UInt8, UInt8, UInt8)
+) throws -> CVPixelBuffer {
+    var pixelBuffer: CVPixelBuffer?
+    let status = CVPixelBufferCreate(
+        kCFAllocatorDefault,
+        width,
+        height,
+        kCVPixelFormatType_32BGRA,
+        [
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:]
+        ] as CFDictionary,
+        &pixelBuffer
+    )
+    guard status == kCVReturnSuccess, let pixelBuffer else {
+        struct PixelBufferError: Error {}
+        throw PixelBufferError()
+    }
+
+    CVPixelBufferLockBaseAddress(pixelBuffer, [])
+    defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
+
+    let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+    guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+        struct PixelBufferError: Error {}
+        throw PixelBufferError()
+    }
+
+    let buffer = baseAddress.bindMemory(to: UInt8.self, capacity: bytesPerRow * height)
+    for y in 0..<height {
+        let row = buffer.advanced(by: y * bytesPerRow)
+        for x in 0..<width {
+            let offset = x * 4
+            row[offset + 0] = rgb.2
+            row[offset + 1] = rgb.1
+            row[offset + 2] = rgb.0
+            row[offset + 3] = 255
+        }
+    }
+    return pixelBuffer
 }

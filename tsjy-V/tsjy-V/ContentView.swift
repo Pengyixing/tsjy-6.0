@@ -161,6 +161,11 @@ struct ContentView: View {
                     Button("急停", role: .destructive) {
                         appModel.emergencyStop()
                     }
+
+                    Button("恢复") {
+                        appModel.releaseEmergencyStop()
+                    }
+                    .buttonStyle(.bordered)
                 }
 
                 HStack {

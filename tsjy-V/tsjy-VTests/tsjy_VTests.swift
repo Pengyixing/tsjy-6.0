@@ -5,6 +5,8 @@
 //  Created by Peng Yixing on 2026/5/12.
 //
 
+import CoreFoundation
+import Foundation
 import Testing
 @testable import tsjy_V
 
@@ -158,6 +160,16 @@ struct tsjy_VTests {
         #expect(appModel.latestCommandDetail == "控制已锁定，已请求重新解锁")
     }
 
+    @MainActor
+    @Test func releaseEmergencyStop_updatesRecoveryStatusText() async throws {
+        let appModel = AppModel()
+
+        appModel.releaseEmergencyStop()
+
+        #expect(appModel.latestCommandPhaseText == "请求解除急停")
+        #expect(appModel.latestCommandDetail == "已向 Mac 发送解除急停请求")
+    }
+
     @Test func immersiveWristMenu_staysVisibleDuringReentryGracePeriod() async throws {
         #expect(ImmersiveView.wristMenuVisibility(isUIFixed: false, isWristVisible: false, forceVisible: true) == 1.0)
         #expect(ImmersiveView.wristMenuVisibility(isUIFixed: false, isWristVisible: true, forceVisible: false) == 1.0)
@@ -169,8 +181,12 @@ struct tsjy_VTests {
         #expect(WristMenuView.actionRailItemIDs.contains("emergencyStop"))
     }
 
+    @Test func wristMenuActionRail_containsReleaseEmergencyShortcut() async throws {
+        #expect(WristMenuView.actionRailItemIDs.contains("releaseEmergencyStop"))
+    }
+
     @Test func wristMenuActionRail_prioritizesSafetyActions() async throws {
-        #expect(WristMenuView.actionRailItemIDs == ["armControl", "emergencyStop", "controlWindow", "livePanorama"])
+        #expect(WristMenuView.actionRailItemIDs == ["armControl", "emergencyStop", "releaseEmergencyStop", "controlWindow", "livePanorama"])
     }
 
 }

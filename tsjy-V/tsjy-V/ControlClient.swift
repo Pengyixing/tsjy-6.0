@@ -100,6 +100,22 @@ final class ControlClient {
         )
     }
 
+    func releaseEmergencyStop() {
+        send(
+            ControlClientMessage(
+                type: "releaseEmergencyStop",
+                clientID: clientID,
+                sessionID: sessionID,
+                commandID: UUID().uuidString,
+                deviceID: nil,
+                action: nil,
+                parameters: nil,
+                reason: nil,
+                clientSendTimestamp: Date().timeIntervalSince1970
+            )
+        )
+    }
+
     func startPump() {
         sendCommand(deviceID: "assembler", action: "startPump", parameters: nil)
     }

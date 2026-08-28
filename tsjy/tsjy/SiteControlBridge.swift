@@ -261,6 +261,44 @@ final class SiteControlBridge {
         return SiteCommandResult(accepted: true, message: "已执行急停")
     }
 
+    func releaseEmergencyStop(reason: String) -> SiteCommandResult {
+        devices = devices.map { device in
+            switch device.id {
+            case "auxPump":
+                return SiteDeviceState(
+                    id: device.id,
+                    name: device.name,
+                    summary: "待命",
+                    isRunning: false,
+                    rpm: nil,
+                    minRPM: nil,
+                    maxRPM: nil,
+                    properties: device.properties
+                )
+            case "assembler":
+                var newProps = device.properties ?? [:]
+                newProps["travelEnable"] = 0
+                newProps["cylinderEnable"] = 0
+                newProps["travelDirectionAN1"] = 0
+                newProps["rotationDirectionAN2"] = 0
+                return SiteDeviceState(
+                    id: device.id,
+                    name: device.name,
+                    summary: "待命",
+                    isRunning: false,
+                    rpm: nil,
+                    minRPM: nil,
+                    maxRPM: nil,
+                    properties: newProps
+                )
+            default:
+                return device
+            }
+        }
+        onLog?("解除急停: \(reason)")
+        return SiteCommandResult(accepted: true, message: "已解除急停")
+    }
+
     private func applyMockMutation(deviceID: String, action: String, parameters: [String: Double]) {
         devices = devices.map { device in
             guard device.id == deviceID else { return device }

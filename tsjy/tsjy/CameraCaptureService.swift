@@ -7,12 +7,266 @@ import CoreVideo.CVPixelBuffer
 import ImageIO
 import UniformTypeIdentifiers
 
+struct VideoRecordingState {
+    var directoryURL: URL
+    var currentFileURL: URL?
+    var lastCompletedFileURL: URL?
+    var isRecording: Bool
+    var statusText: String
+}
+
+final class PanoramaVideoRecorder {
+    private let fileManager: FileManager
+    private let renderContext = CIContext()
+    private let queue = DispatchQueue(label: "tsjy.video.recording")
+    private var outputDirectory: URL
+    private var writer: AVAssetWriter?
+    private var writerInput: AVAssetWriterInput?
+    private var pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
+    private var armedOutputURL: URL?
+    private var lastCompletedFileURL: URL?
+    private var isRecordingArmed = false
+    private var hasWrittenFrames = false
+
+    init(outputDirectory: URL? = nil, fileManager: FileManager = .default) {
+        self.fileManager = fileManager
+        self.outputDirectory = outputDirectory ?? Self.defaultRecordingDirectoryURL(fileManager: fileManager)
+        try? fileManager.createDirectory(at: self.outputDirectory, withIntermediateDirectories: true)
+    }
+
+    var outputDirectoryURL: URL {
+        queue.sync { outputDirectory }
+    }
+
+    var currentOutputURL: URL? {
+        queue.sync { armedOutputURL }
+    }
+
+    var latestCompletedOutputURL: URL? {
+        queue.sync { lastCompletedFileURL }
+    }
+
+    var isRecording: Bool {
+        queue.sync { isRecordingArmed || writer != nil }
+    }
+
+    func startRecording(filePrefix: String = "panorama-recording") throws -> URL {
+        try queue.sync {
+            guard !isRecordingArmed, writer == nil else {
+                throw NSError(
+                    domain: "tsjy.recorder",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "录像已在进行中"]
+                )
+            }
+            try fileManager.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+            let timestamp = Self.fileTimestampFormatter.string(from: Date())
+            let filename = "\(filePrefix)_\(timestamp).mp4"
+            let fileURL = outputDirectory.appendingPathComponent(filename)
+            if fileManager.fileExists(atPath: fileURL.path) {
+                try fileManager.removeItem(at: fileURL)
+            }
+            armedOutputURL = fileURL
+            isRecordingArmed = true
+            hasWrittenFrames = false
+            return fileURL
+        }
+    }
+
+    func append(pixelBuffer: CVPixelBuffer, at presentationTimeStamp: CMTime) throws {
+        try queue.sync {
+            guard isRecordingArmed || writer != nil else { return }
+            if writer == nil {
+                try prepareWriterIfNeeded(firstPixelBuffer: pixelBuffer)
+            }
+            guard let writer, let writerInput, let pixelBufferAdaptor else { return }
+            guard writer.status != .failed else {
+                throw writer.error ?? NSError(
+                    domain: "tsjy.recorder",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "录像写入失败"]
+                )
+            }
+            if writer.status == .unknown {
+                writer.startWriting()
+                writer.startSession(atSourceTime: presentationTimeStamp)
+            }
+            guard writerInput.isReadyForMoreMediaData else { return }
+            guard let recordingBuffer = makeRecordingPixelBuffer(from: pixelBuffer, adaptor: pixelBufferAdaptor) else {
+                throw NSError(
+                    domain: "tsjy.recorder",
+                    code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "无法创建录像缓冲区"]
+                )
+            }
+            if pixelBufferAdaptor.append(recordingBuffer, withPresentationTime: presentationTimeStamp) {
+                hasWrittenFrames = true
+            } else {
+                throw writer.error ?? NSError(
+                    domain: "tsjy.recorder",
+                    code: 4,
+                    userInfo: [NSLocalizedDescriptionKey: "无法写入录像帧"]
+                )
+            }
+        }
+    }
+
+    func stopRecording() async throws -> URL? {
+        try await withCheckedThrowingContinuation { continuation in
+            var finishWriter: AVAssetWriter?
+            var finishInput: AVAssetWriterInput?
+            var outputURL: URL?
+            var shouldDeleteArmedFile = false
+
+            queue.sync {
+                outputURL = armedOutputURL
+                guard isRecordingArmed || writer != nil else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                isRecordingArmed = false
+                if !hasWrittenFrames || writer == nil {
+                    shouldDeleteArmedFile = true
+                    armedOutputURL = nil
+                    writer = nil
+                    writerInput = nil
+                    pixelBufferAdaptor = nil
+                    continuation.resume(returning: nil)
+                    return
+                }
+                finishWriter = writer
+                finishInput = writerInput
+                writer = nil
+                writerInput = nil
+                pixelBufferAdaptor = nil
+            }
+
+            if shouldDeleteArmedFile, let outputURL, self.fileManager.fileExists(atPath: outputURL.path) {
+                try? self.fileManager.removeItem(at: outputURL)
+                return
+            }
+
+            guard let finishWriter, let finishInput, let outputURL else {
+                return
+            }
+
+            finishInput.markAsFinished()
+            finishWriter.finishWriting {
+                self.queue.async {
+                    let status = finishWriter.status
+                    let error = finishWriter.error
+                    self.armedOutputURL = nil
+                    if status == .completed {
+                        self.lastCompletedFileURL = outputURL
+                        continuation.resume(returning: outputURL)
+                    } else {
+                        if self.fileManager.fileExists(atPath: outputURL.path) {
+                            try? self.fileManager.removeItem(at: outputURL)
+                        }
+                        continuation.resume(throwing: error ?? NSError(
+                            domain: "tsjy.recorder",
+                            code: 5,
+                            userInfo: [NSLocalizedDescriptionKey: "结束录像失败"]
+                        ))
+                    }
+                }
+            }
+        }
+    }
+
+    private func prepareWriterIfNeeded(firstPixelBuffer: CVPixelBuffer) throws {
+        guard let outputURL = armedOutputURL else {
+            throw NSError(
+                domain: "tsjy.recorder",
+                code: 6,
+                userInfo: [NSLocalizedDescriptionKey: "未设置录像输出路径"]
+            )
+        }
+        let width = CVPixelBufferGetWidth(firstPixelBuffer)
+        let height = CVPixelBufferGetHeight(firstPixelBuffer)
+        let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
+        let settings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: width,
+            AVVideoHeightKey: height,
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey: max(width * height * 8, 8_000_000),
+                AVVideoMaxKeyFrameIntervalKey: 30,
+                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
+            ]
+        ]
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
+        input.expectsMediaDataInRealTime = true
+        guard writer.canAdd(input) else {
+            throw NSError(
+                domain: "tsjy.recorder",
+                code: 7,
+                userInfo: [NSLocalizedDescriptionKey: "录像输入通道不可用"]
+            )
+        }
+        writer.add(input)
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: input,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: width,
+                kCVPixelBufferHeightKey as String: height,
+                kCVPixelBufferIOSurfacePropertiesKey as String: [:]
+            ]
+        )
+        self.writer = writer
+        self.writerInput = input
+        self.pixelBufferAdaptor = adaptor
+    }
+
+    private func makeRecordingPixelBuffer(
+        from sourceBuffer: CVPixelBuffer,
+        adaptor: AVAssetWriterInputPixelBufferAdaptor
+    ) -> CVPixelBuffer? {
+        var targetBuffer: CVPixelBuffer?
+        if let pool = adaptor.pixelBufferPool {
+            let status = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &targetBuffer)
+            guard status == kCVReturnSuccess else { return nil }
+        } else {
+            let width = CVPixelBufferGetWidth(sourceBuffer)
+            let height = CVPixelBufferGetHeight(sourceBuffer)
+            let status = CVPixelBufferCreate(
+                kCFAllocatorDefault,
+                width,
+                height,
+                kCVPixelFormatType_32BGRA,
+                [
+                    kCVPixelBufferIOSurfacePropertiesKey as String: [:]
+                ] as CFDictionary,
+                &targetBuffer
+            )
+            guard status == kCVReturnSuccess else { return nil }
+        }
+        guard let targetBuffer else { return nil }
+        renderContext.render(CIImage(cvPixelBuffer: sourceBuffer), to: targetBuffer)
+        return targetBuffer
+    }
+
+    private static func defaultRecordingDirectoryURL(fileManager: FileManager) -> URL {
+        let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support", isDirectory: true)
+        return appSupport.appendingPathComponent("tsjy/video-recordings", isDirectory: true)
+    }
+
+    private static let fileTimestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd_HHmmss"
+        return formatter
+    }()
+}
+
 final class CameraCaptureService: NSObject {
     var onEncodedFrame: ((EncodedVideoFrame) -> Void)?
     var onVideoConfiguration: ((VideoConfiguration) -> Void)?
     var onDevicesChanged: (([CameraDeviceInfo]) -> Void)?
     var onStatus: ((String) -> Void)?
     var onPreviewFrames: ((CGImage?, CGImage?) -> Void)?
+    var onRecordingStateChanged: ((VideoRecordingState) -> Void)?
 
     private let session = AVCaptureSession()
     private let output = AVCaptureVideoDataOutput()
@@ -40,6 +294,8 @@ final class CameraCaptureService: NSObject {
     private var ffmpegOutputHandle: FileHandle?
     private var ffmpegErrorHandle: FileHandle?
     private var selectedQualityMode: VideoQualityMode = .fullHD
+    private let recorder = PanoramaVideoRecorder()
+    private var recordingStatusText = "未录制"
 
     override init() {
         super.init()
@@ -48,6 +304,41 @@ final class CameraCaptureService: NSObject {
         }
         encoder.onConfiguration = { [weak self] configuration in
             self?.onVideoConfiguration?(configuration)
+        }
+        publishRecordingState()
+    }
+
+    var recordingState: VideoRecordingState {
+        VideoRecordingState(
+            directoryURL: recorder.outputDirectoryURL,
+            currentFileURL: recorder.currentOutputURL,
+            lastCompletedFileURL: recorder.latestCompletedOutputURL,
+            isRecording: recorder.isRecording,
+            statusText: recordingStatusText
+        )
+    }
+
+    func startRecording() throws -> URL {
+        let fileURL = try recorder.startRecording(filePrefix: "panorama-recording")
+        recordingStatusText = "录制中"
+        publishRecordingState()
+        return fileURL
+    }
+
+    func stopRecording() async throws -> URL? {
+        let fileURL = try await recorder.stopRecording()
+        if let fileURL {
+            recordingStatusText = "已结束: \(fileURL.lastPathComponent)"
+        } else {
+            recordingStatusText = "已停止，未写入视频帧"
+        }
+        publishRecordingState()
+        return fileURL
+    }
+
+    private func publishRecordingState() {
+        DispatchQueue.main.async {
+            self.onRecordingStateChanged?(self.recordingState)
         }
     }
 
@@ -160,6 +451,11 @@ final class CameraCaptureService: NSObject {
     }
 
     func stop(notify: Bool = true) {
+        if recorder.isRecording {
+            Task { [weak self] in
+                _ = try? await self?.stopRecording()
+            }
+        }
         stopFFmpegCapture()
         if session.isRunning {
             session.stopRunning()
@@ -372,6 +668,7 @@ final class CameraCaptureService: NSObject {
             duration: duration,
             wallClockTimestamp: Date().timeIntervalSince1970
         )
+        try? recorder.append(pixelBuffer: pixelBuffer, at: pts)
     }
 
     private func makePixelBuffer(from frameData: Data, width: Int, height: Int, bytesPerRow: Int) -> CVPixelBuffer? {
@@ -543,5 +840,6 @@ extension CameraCaptureService: AVCaptureVideoDataOutputSampleBufferDelegate {
             duration: CMSampleBufferGetDuration(sampleBuffer),
             wallClockTimestamp: Date().timeIntervalSince1970
         )
+        try? recorder.append(pixelBuffer: pixelBuffer, at: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
     }
 }

@@ -851,6 +851,38 @@ final class ControlSafetyManager {
         _ = reason
     }
 
+    func releaseEmergencyStop(sessionID: String?) -> (accepted: Bool, message: String) {
+        expireIfNeeded()
+        guard var current = session else {
+            return (false, "尚未建立控制会话")
+        }
+        guard current.sessionID == sessionID else {
+            return (false, "控制会话不匹配")
+        }
+        guard current.emergencyStopped else {
+            current.isArmed = true
+            current.lastHeartbeat = .now
+            session = current
+            return (true, "控制权限已解锁")
+        }
+        current.emergencyStopped = false
+        current.isArmed = true
+        current.lastHeartbeat = .now
+        session = current
+        return (true, "已解除急停并恢复控制权限")
+    }
+
+    func releaseEmergencyStopLocally() -> (accepted: Bool, message: String) {
+        guard var current = session else {
+            return (true, "已解除本地急停，当前无远程控制会话")
+        }
+        current.emergencyStopped = false
+        current.isArmed = true
+        current.lastHeartbeat = .now
+        session = current
+        return (true, "已解除本地急停并恢复控制权限")
+    }
+
     func reset() {
         session = nil
     }

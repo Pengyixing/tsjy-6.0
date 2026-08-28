@@ -336,6 +336,10 @@ final class AppModel {
     var projectionMode = "Raw"
     var isSpherePreviewEnabled = false
     var rawFramesDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("tsjy-raw-frames", isDirectory: true).path
+    var videoRecordingDirectoryPath = ""
+    var videoRecordingStatus = "未录制"
+    var isVideoRecording = false
+    var activeVideoRecordingFilePath = "未开始"
     var contentSources: [ContentSourceItem] = AppModel.defaultContentSources
     var selectedContentSourceID: String?
     var gatewayReachableHosts: [String] = []
@@ -392,6 +396,7 @@ final class AppModel {
         let dir = appSupport.appendingPathComponent("tsjy", isDirectory: true)
         return dir.appendingPathComponent("sources.json")
     }()
+    private static let stateExportDirectoryDefaultsKey = "StateExportDirectoryPath"
     private let panoramaLibraryRootURL: URL = {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let dir = appSupport.appendingPathComponent("tsjy/panorama-library", isDirectory: true)
@@ -530,6 +535,8 @@ final class AppModel {
     init() {
         loadContentSources()
         wireServices()
+        applyVideoRecordingState(cameraService.recordingState)
+        ensureDefaultStateExportDirectoryReady()
         refreshGatewayReachableHosts()
         refreshRelayStatusForConfiguration()
         ensurePanoramaLibraryReady()
@@ -694,7 +701,9 @@ final class AppModel {
     }
 
     var stateExportDirectoryPath: String {
-        UserDefaults.standard.string(forKey: "StateExportDirectoryPath") ?? ""
+        let storedPath = UserDefaults.standard.string(forKey: Self.stateExportDirectoryDefaultsKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (storedPath?.isEmpty == false ? storedPath : Self.defaultStateExportDirectoryURL().path) ?? ""
     }
 
     var activeStateExportFileName: String {
@@ -705,10 +714,40 @@ final class AppModel {
         activeStateExportFileURL?.path ?? "未开始"
     }
 
+    func startVideoRecording() {
+        do {
+            let fileURL = try cameraService.startRecording()
+            applyVideoRecordingState(cameraService.recordingState)
+            log("已开始视频录制: \(fileURL.path)")
+        } catch {
+            log("开始视频录制失败: \(error.localizedDescription)")
+        }
+    }
+
+    func stopVideoRecording() async {
+        do {
+            let fileURL = try await cameraService.stopRecording()
+            applyVideoRecordingState(cameraService.recordingState)
+            if let fileURL {
+                log("已结束视频录制: \(fileURL.path)")
+            } else {
+                log("已停止视频录制，但本次未写入有效视频帧")
+            }
+        } catch {
+            log("结束视频录制失败: \(error.localizedDescription)")
+        }
+    }
+
     private var stateExportDirectoryURL: URL? {
         let path = stateExportDirectoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !path.isEmpty else { return nil }
         return URL(fileURLWithPath: path, isDirectory: true)
+    }
+
+    private static func defaultStateExportDirectoryURL(fileManager: FileManager = .default) -> URL {
+        let desktopURL = fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent("Desktop", isDirectory: true)
+        return desktopURL.appendingPathComponent("数据记录", isDirectory: true)
     }
 
     func publishedVideoSocketURL(host: String) -> String {
@@ -733,15 +772,17 @@ final class AppModel {
     }
 
     func configureStateExportDirectory(url: URL) {
-        UserDefaults.standard.set(url.path, forKey: "StateExportDirectoryPath")
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        UserDefaults.standard.set(url.path, forKey: Self.stateExportDirectoryDefaultsKey)
         activeStateExportFileURL = nil
         log("已设置状态导出目录: \(url.path)")
     }
 
     func clearStateExportDirectory() {
-        UserDefaults.standard.removeObject(forKey: "StateExportDirectoryPath")
+        UserDefaults.standard.removeObject(forKey: Self.stateExportDirectoryDefaultsKey)
         activeStateExportFileURL = nil
-        log("已关闭状态导出")
+        ensureDefaultStateExportDirectoryReady()
+        log("已恢复默认状态导出目录: \(stateExportDirectoryPath)")
     }
 
     func activeStateExportFileURLForTesting() -> URL? {
@@ -1352,6 +1393,16 @@ final class AppModel {
         }
     }
 
+    func releaseEmergencyStop() {
+        Task {
+            let result = safetyManager.releaseEmergencyStopLocally()
+            _ = await siteBridge.releaseEmergencyStop(reason: "来自 Mac 控制台解除急停")
+            await refreshSnapshot(reason: "Mac 解除急停")
+            broadcastSnapshot(type: "status", message: result.message)
+            log(result.message)
+        }
+    }
+
     func executeLocalSiteCommand(deviceID: String, action: String, parameters: [String: Double] = [:]) {
         Task {
             let commandID = UUID().uuidString
@@ -1552,6 +1603,11 @@ final class AppModel {
                 self?.updateRawFrameMetadata(using: raw)
             }
         }
+        cameraService.onRecordingStateChanged = { [weak self] state in
+            Task { @MainActor in
+                self?.applyVideoRecordingState(state)
+            }
+        }
         cameraService.onEncodedFrame = { [weak self] frame in
             guard let self else { return }
             videoServer.broadcast(frame: frame)
@@ -1692,12 +1748,26 @@ final class AppModel {
         }
     }
 
+    private func applyVideoRecordingState(_ state: VideoRecordingState) {
+        videoRecordingDirectoryPath = state.directoryURL.path
+        videoRecordingStatus = state.statusText
+        isVideoRecording = state.isRecording
+        activeVideoRecordingFilePath = state.currentFileURL?.path
+            ?? state.lastCompletedFileURL?.path
+            ?? "未开始"
+    }
+
     private func autoImportSuggestedPanoramaDirectoryIfNeeded() {
         guard contentSources.allSatisfy({ !$0.type.isPanoramaScene }),
               FileManager.default.fileExists(atPath: suggestedPanoramaImportURL.path) else {
             return
         }
         importPanoramaDirectory(url: suggestedPanoramaImportURL)
+    }
+
+    private func ensureDefaultStateExportDirectoryReady() {
+        guard let directoryURL = stateExportDirectoryURL else { return }
+        try? FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
     }
 
     private func distributedURLString(for source: ContentSourceItem) -> String? {
@@ -2029,6 +2099,17 @@ final class AppModel {
                     ControlServerMessage(type: "status", accepted: result.accepted, message: result.message, sessionID: envelope.sessionID, snapshot: snapshot, commandID: envelope.commandID),
                     to: peer
                 )
+            case "releaseEmergencyStop":
+                let result = safetyManager.releaseEmergencyStop(sessionID: envelope.sessionID)
+                if result.accepted {
+                    _ = await siteBridge.releaseEmergencyStop(reason: envelope.reason ?? "远程解除急停")
+                }
+                let snapshot = await currentSnapshot()
+                try controlServer.send(
+                    ControlServerMessage(type: "status", accepted: result.accepted, message: result.message, sessionID: envelope.sessionID, snapshot: snapshot, commandID: envelope.commandID),
+                    to: peer
+                )
+                broadcastSnapshot(type: "status", message: result.message)
             case "videoMetricBatch":
                 if let batch = envelope.videoMetricBatch {
                     recordVisionMetricBatch(batch)
@@ -2103,6 +2184,16 @@ final class AppModel {
                 try controlRelay.send(
                     ControlServerMessage(type: "status", accepted: result.accepted, message: result.message, sessionID: envelope.sessionID, snapshot: snapshot, commandID: envelope.commandID)
                 )
+            case "releaseEmergencyStop":
+                let result = safetyManager.releaseEmergencyStop(sessionID: envelope.sessionID)
+                if result.accepted {
+                    _ = await siteBridge.releaseEmergencyStop(reason: envelope.reason ?? "远程解除急停(中继)")
+                }
+                let snapshot = await currentSnapshot()
+                try controlRelay.send(
+                    ControlServerMessage(type: "status", accepted: result.accepted, message: result.message, sessionID: envelope.sessionID, snapshot: snapshot, commandID: envelope.commandID)
+                )
+                broadcastSnapshot(type: "status", message: result.message)
             case "videoMetricBatch":
                 if let batch = envelope.videoMetricBatch {
                     recordVisionMetricBatch(batch)

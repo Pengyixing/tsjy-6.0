@@ -171,6 +171,7 @@ struct ContentView: View {
 
             VStack(spacing: 20) {
                 previewSection
+                videoRecordingSection
                 inspectionSection
                 deviceSection
                 logSection
@@ -321,6 +322,11 @@ struct ContentView: View {
                         appModel.sendMockEmergencyStop()
                     }
                     .buttonStyle(.borderedProminent)
+
+                    Button("解除急停") {
+                        appModel.releaseEmergencyStop()
+                    }
+                    .buttonStyle(.bordered)
                 }
             }
         }
@@ -514,6 +520,41 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
 
                 RawFramePane(image: appModel.rawPreviewImage)
+            }
+        }
+    }
+
+    private var videoRecordingSection: some View {
+        DashboardPanel(title: "视频录制", systemImage: "record.circle") {
+            VStack(alignment: .leading, spacing: 14) {
+                LabeledContent("录像状态", value: appModel.videoRecordingStatus)
+                LabeledContent("录像目录", value: appModel.videoRecordingDirectoryPath)
+                LabeledContent("当前文件", value: appModel.activeVideoRecordingFilePath)
+
+                HStack(spacing: 10) {
+                    Button("开始录制") {
+                        appModel.startVideoRecording()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(appModel.isVideoRecording)
+
+                    Button("结束录制") {
+                        Task {
+                            await appModel.stopVideoRecording()
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!appModel.isVideoRecording)
+
+                    Button("打开录像目录") {
+                        openVideoRecordingDirectory()
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                Text("录像文件统一写入 Mac 本地专用视频记录文件夹，便于后续查找和归档。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -892,6 +933,11 @@ struct ContentView: View {
     private func openStateExportDirectory() {
         guard !appModel.stateExportDirectoryPath.isEmpty else { return }
         NSWorkspace.shared.open(URL(fileURLWithPath: appModel.stateExportDirectoryPath, isDirectory: true))
+    }
+
+    private func openVideoRecordingDirectory() {
+        guard !appModel.videoRecordingDirectoryPath.isEmpty else { return }
+        NSWorkspace.shared.open(URL(fileURLWithPath: appModel.videoRecordingDirectoryPath, isDirectory: true))
     }
 }
 

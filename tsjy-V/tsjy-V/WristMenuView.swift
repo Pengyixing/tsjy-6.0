@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct WristMenuView: View {
-    static let actionRailItemIDs = ["armControl", "emergencyStop", "controlWindow", "livePanorama"]
+    static let actionRailItemIDs = ["armControl", "emergencyStop", "releaseEmergencyStop", "controlWindow", "livePanorama"]
 
     @Environment(AppModel.self) private var appModel
 
@@ -93,6 +93,20 @@ struct WristMenuView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.red)
             }
+
+            Button {
+                appModel.releaseEmergencyStop()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.clockwise.circle.fill")
+                        .font(.system(size: 20))
+                    Text("解除急停")
+                        .font(.footnote.weight(.medium))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+            }
+            .buttonStyle(.bordered)
 
             HStack(spacing: 12) {
                 Button {

@@ -317,6 +317,12 @@ final class AppModel {
         controlClient.arm()
     }
 
+    func releaseEmergencyStop() {
+        controlClient.releaseEmergencyStop()
+        latestCommandPhaseText = "请求解除急停"
+        latestCommandDetail = "已向 Mac 发送解除急停请求"
+    }
+
     func startPump() {
         requestControlAction(.startPump)
     }
