@@ -3,6 +3,7 @@
 盾构拼装机远程管控系统，包含 `Mac 网关端（tsjy）` 与 `Vision Pro 客户端（tsjy-V）` 两部分。系统面向工业远程操作与监测场景，打通了现场 PLC / Modbus、视频推流、Vision Pro 沉浸式显示、命令回执、试验监测与数据导出。
 
 ## 系统组成
+<img width="2474" height="1178" alt="image" src="https://github.com/user-attachments/assets/884a3004-bc02-4859-9f87-8b9b9935c63a" />
 
 ### 1. Mac 网关端 `tsjy`
 - 采集本地摄像头画面，支持全景候选输入判定
