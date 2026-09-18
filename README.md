@@ -5,6 +5,11 @@
 ## 系统组成
 <img width="2010" height="1112" alt="image" src="https://github.com/user-attachments/assets/ccb8d313-71c7-4428-8164-27132227fb7c" />
 
+### 0. 管控效果
+
+盾构现场真机管控
+
+https://github.com/user-attachments/assets/6dde7ab8-ef6a-4a67-8119-a53b1e35f1e1
 
 ### 1. Mac 网关端 `tsjy`
 - 采集本地摄像头画面，支持全景候选输入判定
@@ -29,7 +34,7 @@
 - 内容管理：支持网页、普通视频、全景照片、全景视频等内容源统一管理
 - 数据导出：支持试验过程记录导出，便于实验分析、性能评估和论文/报告整理
 
-## 目录结构
+## 代码目录结构
 
 ```text
 管控6.0/
